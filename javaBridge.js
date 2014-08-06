@@ -21,7 +21,7 @@ var path = require('path');
 var EventEmitter = require('events').EventEmitter;
 var spawn = require('child_process').spawn;
 
-var logging = require('../util/logging');
+var logging = require('../../util/logging');
 var logger = logging.get('jvmtools');
 
 var jsio = require('jsio');
