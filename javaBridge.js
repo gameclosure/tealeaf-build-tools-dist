@@ -117,7 +117,7 @@ function getClient () {
       // process.stderr.write('TealeafBuildTools: ' + data);
     });
     proc.on('exit', function (code) {
-      if (code !== 0) {
+      if (code !== 0 && _javaProcess) {
         logger.error('exited with code ' + code);
       }
       proc.stdin.end();
