@@ -32,7 +32,84 @@ var Callback = require('jsio/lib/Callback');
 
 var _javaProcess = null;
 var _withClient = new Callback();
-var _handlers = {};
+var _tools = {};
+
+// serializes requests to the same tool for the jvmtools
+var ToolQueue = Class(function () {
+  this.init = function () {
+    this._queue = [];
+
+    // can't run anything until we have a client ref
+    getClient().run(this, function (client) {
+      this._client = client;
+      this._run();
+    });
+  }
+
+  this.add = function (opts, cb) {
+    this._queue.push({opts: opts, cb: cb});
+    this._run();
+  }
+
+  this.getEmitter = function () {
+    return this._emitter;
+  }
+
+  this._run = function () {
+    if (this._isRunning || !this._client || !this._queue.length) { return; }
+    this._isRunning = true;
+
+    var item = this._queue.shift();
+    var opts = item.opts;
+    var cb = bind(this, function onFinish() {
+      // on finish, release the lock and run the next item
+      this._isRunning = false;
+      process.nextTick(bind(this, '_run'));
+
+      // call the callback, forwarding arguments
+      item.cb && item.cb.apply(global, arguments);
+    });
+
+    var client = this._client;
+    var line = JSON.stringify({
+        tool: opts.tool,
+        args: opts.args,
+        stdin: "\n" + opts.stdin || ''
+      });
+
+    client.write(line);
+    client.write("\n");
+
+    var emitter = this._emitter = new EventEmitter();
+    if (opts.print) {
+      emitter.on('out', function (data) {
+        console.log(data);
+      });
+
+      emitter.on('err', function (data) {
+        console.log(data);
+      });
+    }
+
+    if (opts.buffer) {
+      var out = [];
+      var err = [];
+      emitter.on('out', function (data) { out.push(data); });
+      emitter.on('err', function (data) { err.push(data); });
+      emitter.on('end', bind(this, function (code) {
+        this._emitter = null;
+
+        if (code) {
+          logger.error('code:', code, opts);
+        }
+
+        cb && cb(code, out.join(''), err.join(''));
+      }));
+    } else {
+      cb && cb(null, emitter);
+    }
+  }
+});
 
 exports.stop = function (cb) {
   if (_withClient.hasFired()) {
@@ -56,40 +133,10 @@ exports.stop = function (cb) {
 };
 
 exports.exec = function (opts, cb) {
-  getClient().run(function (client) {
-    var line = JSON.stringify({
-        tool: opts.tool,
-        args: opts.args,
-        stdin: "\n" + opts.stdin || ''
-      });
-
-    client.write(line);
-    client.write("\n");
-
-    var handler = _handlers[opts.tool] = new EventEmitter();
-    if (opts.print) {
-      handler.on('out', function (data) {
-        console.log(data);
-      });
-
-      handler.on('err', function (data) {
-        console.log(data);
-      });
-    }
-
-    if (opts.buffer) {
-      var out = [];
-      var err = [];
-      handler.on('out', function (data) { out.push(data); });
-      handler.on('err', function (data) { err.push(data); });
-      handler.on('end', function (code) {
-        cb(code, out.join(''), err.join(''));
-      });
-    } else {
-      cb(null, handler);
-    }
-  });
-};
+  var tool = opts.tool;
+  var queue = _tools[tool] || (_tools[tool] = new ToolQueue());
+  queue.add(opts, cb);
+}
 
 process.on('exit', function () {
   exports.stop();
@@ -137,22 +184,21 @@ function connectClient (hostname, port) {
   }).on('data', function (data) {
     out.push(data);
     data = data.toString();
-    if (data.match(/\n/)) {
+    if (/\n/.test(data)) {
       var lines = out.join('').split(/\n/);
       out = [lines.pop()];
       lines.forEach(function (line) {
         var data = JSON.parse(line);
-        if (_handlers[data.name]) {
+        var emitter = _tools[data.name].getEmitter();
+        if (emitter) {
           if (data.tag == 'exit') {
-            var handler = _handlers[data.name];
-            _handlers[data.name] = null;
-            handler.emit('end', data.body);
+            emitter.emit('end', data.body);
             out = [];
             return false;
           } else if (data.tag == 'process' && data.body == 'start') {
-            _handlers[data.name].emit('start');
+            emitter.emit('start');
           } else {
-            _handlers[data.name].emit(data.tag, data.body);
+            emitter.emit(data.tag, data.body);
           }
         }
       });
